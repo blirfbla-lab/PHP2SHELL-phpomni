@@ -1,4 +1,4 @@
-
+I AM NOT RESPONSIBLE FOR MISS USE UNDER ANY CIRCUMSTANCE!! USE WISELY made with love from me and my ai assistant.  
 phpomni v4.2.3 — Red Team Operator Documentation
 
 phpomni is a multi-prong PHP exploitation tool engineered for automated initial access, behavioral environment profiling, and native interactive PTY reverse-shell orchestration. The script consolidates legacy and modern PHP vulnerabilities into a single operational workflow that dynamically adjusts its heap-grooming and delivery strategies based on real-time feedback from the target.
