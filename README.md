@@ -161,73 +161,275 @@ python3 phpomni.py --pwn https://target.example/
 phpomni.py [OPTIONS] [URL...]
 ```
 
+Flags are grouped by what they touch. Every one is documented mechanically — what it sends, what it changes, and what it costs.
+
+---
+
 ### Targets
 
-| Flag | Meaning |
-|---|---|
-| `URL...` | One or more targets |
-| `-f, --file PATH` | File of URLs, one per line, `#` comments |
-| `--shodan QUERY` | Pull targets from Shodan |
-| `--shodan-key KEY` | API key, or `SHODAN_API_KEY` |
-| `--limit N` | Max Shodan results (default 50) |
-| `--vhost HOST` | Override the `Host` header |
+#### `URL...`
+Positional, repeatable, zero or more.
+
+Each argument goes to `Target()`. If it has no scheme and no `//`, `http://` is prepended. The path defaults to `/`; a query string is preserved. Port defaults to 443 for `https` and 80 for `http`. IPv6 literals must be bracketed (`[::1]`).
+
+The hostname becomes the `Host:` header verbatim — which is why a bare IP against a vhost router returns the wrong site. See `--vhost`.
+
+No validation beyond that. A typo becomes a target that dies at DNS, and you'll see it as `unreachable` in the report.
+
+```bash
+phpomniv11.py https://a.example/ http://192.0.2.10:8080/path?x=1
+```
+
+#### `-f, --file PATH`
+Reads targets from a file, one per line. Blank lines and lines starting with `#` are skipped. `http://` is prepended to anything without a scheme.
+
+Merged with any positional URLs — the two are additive, not exclusive.
+
+Lines are **not** run through `url_ok`, so a malformed line fails at connect time rather than at parse time. If you want validation, feed the file through the wizard's file option instead.
+
+```bash
+phpomniv11.py -f targets.txt --pwn
+```
+
+#### `--shodan QUERY`
+Pulls targets from the Shodan API instead of you listing them.
+
+Paginates up to five pages with `minify=true` so the response stays small. A `429` sleeps two seconds and retries the same page. Results are filtered to ports 80, 443, 8080, 8000 and 8888 — a match on any other port is discarded even if the host is otherwise interesting. `https://` is used when the result carries an `ssl` block.
+
+Requires `--shodan-key` or `SHODAN_API_KEY`. Merges with positional URLs and `-f`.
+
+Free API keys return roughly 100 results and effectively one page, so `--limit` above that buys nothing.
+
+```bash
+phpomniv11.py --shodan 'http.component:"PHP" http.html:"multipart/form-data"' --limit 40
+```
+
+#### `--shodan-key KEY`
+API key for `--shodan`. Defaults to `SHODAN_API_KEY` from the environment, which is the better habit — the key then stays out of your shell history.
+
+#### `--limit N`
+Default `50`. Caps how many targets `--shodan` returns in total. Ignored when `--shodan` isn't used.
+
+#### `--vhost HOST`
+Sets the `Host:` header, overriding the one derived from the URL. Applied after the defaults, so it wins cleanly.
+
+Needed whenever the target is a reverse proxy routing by hostname — nginx, Nginx Proxy Manager, Traefik, Cloudflare — because hitting the bare IP returns the proxy's default page rather than the app. Same effect as `-H 'Host: x'`, but it also feeds the placeholder detector's retry hint.
+
+```bash
+phpomniv11.py http://203.0.113.9 --vhost shop.example.com
+```
+
+---
 
 ### Modes
 
-| Flag | Meaning |
-|---|---|
-| `--wizard` | Force the guided setup |
-| `--pwn` | Everything on, auto `--lhost`/`--lport` |
-| `--plan` | Print the per-target pipeline before running |
-| `--wrap` | Print a filter chain and exit |
-| `--self-test` | Run assertions and exit |
+#### `--wizard`
+Forces the guided setup, even when URLs were supplied on the command line.
+
+The wizard **replaces** `args.urls` with whatever you answer, so combining it with positional URLs means the URLs you typed are discarded. Useful only when you want to change transport, auth or loudness interactively before a run.
+
+The wizard also runs automatically with no arguments on a TTY, which is the normal way in.
+
+#### `--pwn`
+Turns on the settings you'd otherwise forget: `--config-upload`, `--lport 0` (ephemeral) if the port is still the default, `--transport http` if a Mullvad exit is detected and the transport is still `auto`, and an auto-detected `--lhost` when a callback is expected.
+
+It does **not** touch `--delay`, `--threads` or `--retries` — those are the wizard's loudness question. `--pwn` on the command line is therefore gentler than answering "loud" in the wizard. If you want the full noise, set them yourself.
+
+```bash
+phpomniv11.py --pwn https://target.example/
+```
+
+#### `--plan`
+Prints the pipeline for each target after reconnaissance, then **runs anyway**. It is a preview, not a dry run — recon still issues requests.
+
+Useful for showing a client what's about to happen. Combine with `--no-upload --no-lfi` for something close to read-only.
+
+#### `--wrap`
+Prints a single `convert.iconv` filter chain for a fixed test payload and exits immediately. No network, no targets needed. Handy for pasting into Burp or testing a wrapper by hand.
+
+#### `--self-test`
+Runs 26 assertions over the parsers, header framing, multipart construction, chain generation and URL validation, then exits `0` or `1`.
+
+Run it after every edit. It exists because a `NameError` in a rarely-hit branch once survived to a tagged release.
+
+---
 
 ### Shell transport
 
-| Flag | Meaning |
-|---|---|
-| `--transport {auto,rev,http}` | Default `auto` |
-| `--lhost IP` | Callback address; auto-detected public IP if omitted |
-| `--lport N` | Callback port, `0` for ephemeral |
-| `--no-listener` | Don't bind a listener |
+#### `--transport {auto,rev,http}`
+Default `auto`.
 
-### Auth and network
-
-| Flag | Meaning |
+| Value | Behaviour |
 |---|---|
-| `-H, --header 'K: V'` | Repeatable |
-| `--cookie 'k=v; k2=v2'` | Parsed into the jar |
-| `--auth user:pass` | HTTP Basic |
-| `--proxy URL` | `http://` or `socks5://` |
-| `--timeout SEC` | Default 8 |
-| `--delay LOW-HIGH` | Jitter range, default `0.05-0.25`, `0` to disable |
-| `--retries N` | Default 1 |
-| `--threads N` | Mass mode only, default 8 |
-| `--strict-ssl` | Verify certificates |
+| `auto` | Binds a listener, drops the callback file, waits three seconds after the run, and falls back to an HTTP shell if nothing connected |
+| `rev` | Listener only. No HTTP fallback — if the callback fails you get nothing |
+| `http` | No listener at all. `drop_shell` is skipped; commands go over the webshell URL |
+
+`http` is the correct choice behind NAT, a VPN, or any egress-filtered network. `rev` is the only mode that gives you a TTY.
+
+Forcing `rev` when nothing can call back wastes the run; `auto` costs three seconds.
+
+#### `--lhost IP`
+Callback address embedded in the shell payload. If omitted while a callback is expected, the tool resolves your public IP first and falls back to the route address.
+
+Under Mullvad the public IP is your relay exit — correct, but only reachable if you've enabled port forwarding for that relay. Without forwarding the callback silently dies; `auto` recovers, `rev` doesn't.
+
+#### `--lport N`
+Default `4444`. `0` binds an ephemeral port and writes the real bound port back before any payload is generated, so the listener and the payload always agree.
+
+Unused under `--transport http`. If the default is taken, the listener walks forward up to eight ports before giving up and switching to HTTP.
+
+#### `--no-listener`
+Skips binding entirely. With `--lhost` set the payload still carries the callback, so it fires into nothing — useful for capturing a callback elsewhere, or for a dry run. Without `--lhost` it's a no-op.
+
+---
+
+### Discovery
+
+#### `-w, --wordlist PATH`
+Handler list to probe. **Replaces** the shipped `wordlist.txt` rather than merging with it — first resolution wins.
+
+If the path doesn't exist or can't be read, the tool silently falls back to `wordlist.txt` beside the script, then to 17 built-in entries. A typo'd path gives you the default list with no complaint, so check your spelling if results look generic.
+
+Order is priority order: only the first six matched handlers are tried.
+
+#### `--no-discover`
+Currently skips the wordlist **and** the upload prong's only discovery path, so uploading is effectively disabled. The root page isn't tried either. If you want "root page only", there is no flag for it yet.
+
+---
+
+### Request shaping
+
+#### `-H, --header 'K: V'`
+Repeatable. Split on the first colon, stored, and applied after the defaults — so it overrides `Host`, `User-Agent`, `Content-Type` and `Accept`.
+
+This is the escape hatch for bearer tokens, `X-Forwarded-For: 127.0.0.1`, `X-Original-URL`, and anything else a target wants.
+
+```bash
+-H 'Authorization: Bearer eyJ...' -H 'X-Forwarded-For: 127.0.0.1'
+```
+
+#### `--cookie 'k=v; k2=v2'`
+Parsed on `;`, each pair into the jar, sent as a single `Cookie:` header. The jar also auto-populates from `Set-Cookie`, so a login performed by the tool itself is carried.
+
+No expiry tracking and no `Domain`/`Path` scoping — a stale cookie simply returns the login page and every command comes back as HTML. Re-auth rather than assuming the shell died.
+
+```bash
+--cookie "PHPSESSID=abc123; wordpress_logged_in_x=..."
+```
+
+#### `--auth user:pass`
+Split on the **first** colon, base64'd into `Authorization: Basic`. Colons inside the password survive intact. Sent on every request, including discovery — which can be hundreds of requests.
+
+#### `--proxy URL`
+`http://` uses CONNECT for `https` and an absolute-URI request line for `http`. Any `socks*` scheme uses PySocks over SOCKS5. Missing port defaults to 8080 for HTTP.
+
+```bash
+--proxy socks5://127.0.0.1:1080
+```
+
+Without PySocks installed, a SOCKS proxy raises immediately.
+
+#### `--timeout SEC`
+Default `8`. Applied per socket operation — connect, and each read — not as a total per request. A slow-drip target can therefore exceed it comfortably.
+
+#### `--delay LOW-HIGH`
+Default `0.05-0.25`. Split on the first `-`. A single value (`0.3`) applies to both ends. `0` disables sleeping entirely.
+
+Applied before **every** request, retries included. This is the main WAF lever; the quiet preset is `0.3-0.8`.
+
+#### `--retries N`
+Default `1`, meaning up to two attempts. Retries on `OSError` and `SSLError` only, with a 0.3s backoff. A `403` is not retried — that's a WAF answer, not a transport failure.
+
+#### `--threads N`
+Default `8`. Mass mode only — a single target ignores it, because prongs within a target are already serial. Each worker gets its own `Target`, socket set and cookie jar.
+
+Above roughly 20 you'll trip rate limits on most hosts before you gain wall-clock time.
+
+---
 
 ### Behaviour
 
-| Flag | Meaning |
-|---|---|
-| `-w, --wordlist PATH` | Handler list |
-| `--no-discover` | Skip the wordlist |
-| `--no-upload` / `--no-lfi` | Disable a prong |
-| `--rce-only` | Stop at first execution |
-| `--config-upload` | Plant `.htaccess` / `.user.ini` |
-| `--force` | Run even on a default page |
-| `--cmd 'CMD'` | Command used for proofs |
+#### `--cmd 'CMD'`
+The command used for every proof. Default `id; uname -a`.
+
+It is interpolated into single-quoted PHP (`system('...')`), so semicolons, pipes and redirects are fine but a literal single quote breaks it. Escape those or switch to double quotes.
+
+```bash
+--cmd 'cat /etc/passwd | head'
+```
+
+#### `--loot DIR`
+Default `loot`. `''` disables capture. Created at startup; if creation fails the feature silently switches off.
+
+Each host gets a sanitised subdirectory, and every captured filename is sanitised to `[\w.\-]` and truncated at 120 characters. Distinct paths can collide and overwrite. No size cap, no encryption, no per-run isolation.
+
+```bash
+--loot "loot/$(date +%F)"
+```
+
+#### `--config-upload`
+Adds the `.htaccess` / `.user.ini` prong, scheduled **last**. It needs a directory that already accepted an upload, so it does nothing if the upload prong never landed one.
+
+Tries four `.htaccess` variants first (`SetHandler` in `FilesMatch`, `AddType`, `AddHandler`, a two-line combo), then two `.user.ini` variants with a six-second retry loop for `user_ini.cache_ttl`.
+
+**No backup and no restore.** It will overwrite an existing `.htaccess` in that directory. On a live site, pull a copy first.
+
+#### `--no-upload`
+Removes the upload prong from the plan. Also removes any chance of `--config-upload` working, since that needs a writable directory.
+
+#### `--no-lfi`
+Removes `lfi`, `session` and `logpoison` from the plan. The three are grouped because the latter two need a route discovered by the first.
+
+#### `--rce-only`
+Breaks the prong loop as soon as any `hard` finding exists. Faster, but you lose the later prongs that might upgrade a bare execution into an actual shell file.
+
+#### `--force`
+Bypasses placeholder-page detection. Use it when a real app genuinely contains a marker like "Welcome to nginx" in its body and gets skipped wrongly.
+
+---
 
 ### Output
 
-| Flag | Meaning |
-|---|---|
-| `--json` | JSONL, one object per target |
-| `--resume PATH` | Skip and record completed targets |
-| `--loot DIR` | Loot directory, default `loot` |
-| `--plain` | No dashboard |
-| `--quiet` | Hits only |
-| `--no-color` / `--no-banner` | Cosmetics |
-| `--debug` | Tracebacks |
+#### `--json`
+One JSON object per target on stdout, one per line. Suppresses the banner and the dashboard, and engages quiet mode when stdout isn't a TTY so progress lines don't corrupt the stream.
+
+Shape:
+
+```json
+{"target":"https://x/","os":"unix","sapi":"apache","php":"8.1.2",
+ "shell":"https://x/uploads/phpomni.php","hard":true,
+ "findings":[{"kind":"SHELL","prong":"upload","detail":"..."}]}
+```
+
+#### `--resume PATH`
+Reads existing lines as a skip set, then appends completed targets after the run. Plain text, one URL per line, appended in report order.
+
+Not locked. Two concurrent runs against one file will interleave and can duplicate.
+
+#### `--plain`
+Disables the live dashboard; output falls back to plain lines. Same as running without `rich`.
+
+#### `--quiet`
+Progress lines only — the banner, dashboard and hit markers go silent. Re-enabled automatically for the final report so you still get the verdict and the shell URLs.
+
+#### `--no-color`
+Disables ANSI. `NO_COLOR` in the environment does the same.
+
+#### `--no-banner`
+Suppresses the ASCII banner. Ignored under `--json`.
+
+---
+
+### Diagnostics
+
+#### `--debug`
+Prints a traceback for every prong exception instead of swallowing it, and re-raises inside the thread pool so failures surface.
+
+Prongs catch broadly by design — one bad parser shouldn't abort a target — which means `--debug` is the only way to see why something quietly did nothing.
+
+#### `--self-test`
+See [Modes](#modes).
 
 ### Examples
 
