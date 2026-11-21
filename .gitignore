@@ -1,0 +1,14 @@
+# runtime artefacts
+loot/
+done.txt
+*.jsonl
+out/
+
+# python
+__pycache__/
+*.pyc
+
+# lab leftovers from local testing
+*.log
+p.json
+profiles_out.json
